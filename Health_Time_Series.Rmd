@@ -1,0 +1,1010 @@
+---
+title: "Health Analytics"
+author: "Dalya Adams"
+date: "6/2/2018"
+output: rmarkdown::github_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+library("vars", lib.loc="/Library/Frameworks/R.framework/Versions/3.3/Resources/library")
+library("forecast", lib.loc="/Library/Frameworks/R.framework/Versions/3.3/Resources/library")
+library("corrplot", lib.loc="/Library/Frameworks/R.framework/Versions/3.3/Resources/library")
+library("Hmisc", lib.loc="/Library/Frameworks/R.framework/Versions/3.3/Resources/library")
+```
+
+```{r import}
+#Import training and test set
+train<- read.csv("~/Desktop/MSPA/DS 413/Final Project/Training_Data_Labels.csv")
+features <- read.csv("~/Desktop/MSPA/DS 413/Final Project/Training_Data_Features.csv", header=TRUE)
+test <- read.csv("~/Desktop/MSPA/DS 413/Final Project/Test_Data_Features.csv", header=TRUE)
+```
+
+```{r merge}
+#merge features with the main dataset
+#train$key<-paste(train$city,train$year, train$weekofyear)
+
+train<-merge(train, features, by=c("city", "year", "weekofyear"))
+```
+##Problem
+###The problem under consideration is to predict the total future dengue fever cases in both San Juan, Puerto Rico and Iquitos, Peru, each week. We are provided with NOAA daily climate and precipitation data, PERSIANN precipitation information, a normalized difference in vegetation index, and 3 years of dengue fever cases for San Juan and 5 years of dengue fever cases for Iquitos. 
+
+##Significance
+###This problem is significant because the impact of dengue fever in Latin America is significant, with nearly half a billion cases per year. By predicting the number of cases of dengue fever per week in San Juan, Puerto Rico and Iquitos, Peru, and gaining a better understanding of the relationship between climate and dengue fever, research and resource allocation can be better targeted to eliminate or alleviate the impact of this pandemic. 
+
+###As stated by the Center of Disease Control, “accurate dengue predictions would help public health workers and people around the world take steps to reduce the impact of these epidemics. But predicting dengue is a hefty task that calls for the consolidation of different data sets on disease incidence, weather, and the environment.”
+
+##Data
+### Prior to engineering any features, it is important to look at the raw data. We notice that the majority of the data points are for San Juan, 936 versus 520 for Iquitos. We also notice that the ndvi variables all have negative values, and there are a number of null values in the dataset that will need to be addressed prior to modeling. 
+
+###In reference to the ndvi variables, these represent an index of the difference in vegetation. This change in vegetation index leads me to beleive that negative values are not errors, and thus they are not adjusted. In reference to the null values present in the dataset, a flag variable is created for each null value. If there is a null value, a new column is created with the prefix "m_" and an indicator of "1" is placed at that observation number, otherwise a value of "0" is in the column. This flag variable allows us to determine if the null value has implications on the total number of dengue cases in that week. 
+```{r summary}
+#Summary of all variables
+
+summary(train)
+
+```
+
+```{r subset}
+#subset data based on city
+sjtrain<-train[which(train$city=='sj'),]
+iqtrain<-train[which(train$city=='iq'),]
+
+#subset data based on city
+sjtest<-test[which(test$city=='sj'),]
+iqtest<-test[which(test$city=='iq'),]
+```
+
+```{r time}
+#make time series
+ts.sjtrain<-ts(sjtrain$total_cases, start = c(1990,18), end = c(2008,17), frequency = 52)
+ts.iqtrain<-ts(iqtrain$total_cases, start = c(2000,26), end = c(2010,25), frequency = 52)
+```
+
+
+### Next, the dataset is split up into two datasets, based on the city. A dataset for San Juan is plotted below. It appears the daatset is both seasonal and cyclical, with an extreme peak near 1995.
+```{r plot}
+plot(ts.sjtrain, main='Dengue cases in San Juan, PR', ylab='Total Cases')
+
+```
+
+### Below is a plot of total number of dengue fever cases in Iquitos, Peru. The first thing noticed is that Iquitos' dengue outbreaks do not follow the same pattern as the ones presented for San Juan. This difference is possibly related to the two cities being in different hemispheres. In viewing the dengue cases in Iquitos from 2000 until 2011, we notice the same seasonal and cyclical effect. Also, there is an extreme spike in thsi daatset as well, although around 2005, 10 year after the spike present in the San Juan dataset. 
+```{r plot1}
+plot(ts.iqtrain, main='Dengue cases in Iquitos', ylab='Total Cases')
+```
+```{r, include=FALSE}
+str(sjtrain)
+```
+```{r, include=FALSE}
+str(iqtrain)
+```
+
+### Next we look at the missing values present in the datset. In the San Juan dataset, we notice that there a missing values present in the feature columns. 
+```{r rep nas}
+##Check to see number of null values in each column:
+colSums(is.na(sjtrain))
+```
+
+### These missing values are also present in the Iquitos dataset. 
+```{r rep nas1}
+colSums(is.na(iqtrain))
+```
+
+### Prior to imputing the dataset, we will create flag variables for missing values. The flag variables are created in a new column and for every null value, a '1' is placed in the new column, which has a prefix of 'm_'. If the value is present, a value of '0' is placed in the new column. The purpose of the flag variable is to allow the model to determine if the missing values were predictive in nature.  
+```{r flags}
+## create flags for null variables
+
+sjtrain[ , paste0( "M_",names(sjtrain)[-1])] <- 
+       lapply(sjtrain[-1], function(x) as.numeric(is.na(x)) )
+
+iqtrain[ , paste0( "M_",names(iqtrain)[-1])] <- 
+       lapply(iqtrain[-1], function(x) as.numeric(is.na(x)) )
+
+## create flags for null variables
+
+sjtest[ , paste0( "M_",names(sjtest)[-1])] <- 
+       lapply(sjtest[-1], function(x) as.numeric(is.na(x)) )
+
+iqtest[ , paste0( "M_",names(iqtest)[-1])] <- 
+       lapply(iqtest[-1], function(x) as.numeric(is.na(x)) )
+```
+
+### Now that we have a better idea what the dataset looks like and we've created flag variables for the missing values, we will address missing values as well as feature engineering prior to modeling. The missing values present in the San Juan and Iquitos dataset are imputed, not using a median or mean, but using the last value present in the dataset. Since the dengue dataset is a time series, by imputing with the last present value, we attempt to maintain the trend that was present in the dataset, at the time of the null value. 
+```{r replace null}
+#replace null values with the previous value in each column
+sjtrain<-na.locf(sjtrain)
+iqtrain<-na.locf(iqtrain)
+
+#test
+#replace null values with the previous value in each column
+sjtest<-na.locf(sjtest)
+iqtest<-na.locf(iqtest)
+```
+
+```{r convert1}
+##convert chr to num
+colum<-c(2:4,6:49)
+sjtrain[,colum] <- lapply(sjtrain[,colum], function(x) as.numeric(as.character(x)))
+iqtrain[,colum] <- lapply(iqtrain[,colum], function(x) as.numeric(as.character(x)))
+
+##convert chr to num
+sjtest[,colum] <- lapply(sjtest[,colum], function(x) as.numeric(as.character(x)))
+iqtest[,colum] <- lapply(iqtest[,colum], function(x) as.numeric(as.character(x)))
+```
+
+```{r}
+colnames(sjtrain)
+```
+
+```{r rename cols}
+##rename columns
+names(sjtrain)<-c("city", "year", "weekofyear", "total_cases", "week_start_date", "ndvi_ne", "ndvi_nw", "ndvi_se", "ndvi_sw", "precip_amt_mm", "r_air_temp_k", "r_avg_temp_k", "r_dew_point_temp_k", "r_max_air_temp_k", "r_min_air_temp_k","r_precip_amt", "r_rel_hum_percent", "r_sat_precip_amt", "r_specific_humidity", "r_tdtr_k", "s_avg_temp_c", "s_diur_temp_rng_c", "s_max_temp_c", "s_min_temp_c", "s_precip_mm","m_year", "m_weekofyear", "m_total_cases", "m_week_start_date", "m_ndvi_ne", "m_ndvi_nw", "m_ndvi_se", "m_ndvi_sw", "m_precip_amt_mm", "m_r_air_temp_k", "m_r_avg_temp_k", "m_r_dew_point_temp_k", "m_r_max_air_temp_k", "m_r_min_air_temp_k","m_r_precip_amt", "m_r_rel_hum_percent", "m_r_sat_precip_amt", "m_r_specific_humidity", "m_r_tdtr_k", "m_s_avg_temp_c", "m_s_diur_temp_rng_c", "m_s_max_temp_c", "m_s_min_temp_c", "m_s_precip_mm")
+
+names(iqtrain)<-c("city", "year", "weekofyear", "total_cases", "week_start_date", "ndvi_ne", "ndvi_nw", "ndvi_se", "ndvi_sw", "precip_amt_mm", "r_air_temp_k", "r_avg_temp_k", "r_dew_point_temp_k", "r_max_air_temp_k", "r_min_air_temp_k","r_precip_amt", "r_rel_hum_percent", "r_sat_precip_amt", "r_specific_humidity", "r_tdtr_k", "s_avg_temp_c", "s_diur_temp_rng_c", "s_max_temp_c", "s_min_temp_c", "s_precip_mm","m_year", "m_weekofyear", "m_total_cases", "m_week_start_date", "m_ndvi_ne", "m_ndvi_nw", "m_ndvi_se", "m_ndvi_sw", "m_precip_amt_mm", "m_r_air_temp_k", "m_r_avg_temp_k", "m_r_dew_point_temp_k", "m_r_max_air_temp_k", "m_r_min_air_temp_k","m_r_precip_amt", "m_r_rel_hum_percent", "m_r_sat_precip_amt", "m_r_specific_humidity", "m_r_tdtr_k", "m_s_avg_temp_c", "m_s_diur_temp_rng_c", "m_s_max_temp_c", "m_s_min_temp_c", "m_s_precip_mm")
+
+names(sjtest)<-c("city", "year", "weekofyear", "total_cases", "week_start_date", "ndvi_ne", "ndvi_nw", "ndvi_se", "ndvi_sw", "precip_amt_mm", "r_air_temp_k", "r_avg_temp_k", "r_dew_point_temp_k", "r_max_air_temp_k", "r_min_air_temp_k","r_precip_amt", "r_rel_hum_percent", "r_sat_precip_amt", "r_specific_humidity", "r_tdtr_k", "s_avg_temp_c", "s_diur_temp_rng_c", "s_max_temp_c", "s_min_temp_c", "s_precip_mm","m_year", "m_weekofyear", "m_total_cases", "m_week_start_date", "m_ndvi_ne", "m_ndvi_nw", "m_ndvi_se", "m_ndvi_sw", "m_precip_amt_mm", "m_r_air_temp_k", "m_r_avg_temp_k", "m_r_dew_point_temp_k", "m_r_max_air_temp_k", "m_r_min_air_temp_k","m_r_precip_amt", "m_r_rel_hum_percent", "m_r_sat_precip_amt", "m_r_specific_humidity", "m_r_tdtr_k", "m_s_avg_temp_c", "m_s_diur_temp_rng_c", "m_s_max_temp_c", "m_s_min_temp_c", "m_s_precip_mm")
+
+names(iqtest)<-c("city", "year", "weekofyear", "total_cases", "week_start_date", "ndvi_ne", "ndvi_nw", "ndvi_se", "ndvi_sw", "precip_amt_mm", "r_air_temp_k", "r_avg_temp_k", "r_dew_point_temp_k", "r_max_air_temp_k", "r_min_air_temp_k","r_precip_amt", "r_rel_hum_percent", "r_sat_precip_amt", "r_specific_humidity", "r_tdtr_k", "s_avg_temp_c", "s_diur_temp_rng_c", "s_max_temp_c", "s_min_temp_c", "s_precip_mm","m_year", "m_weekofyear", "m_total_cases", "m_week_start_date", "m_ndvi_ne", "m_ndvi_nw", "m_ndvi_se", "m_ndvi_sw", "m_precip_amt_mm", "m_r_air_temp_k", "m_r_avg_temp_k", "m_r_dew_point_temp_k", "m_r_max_air_temp_k", "m_r_min_air_temp_k","m_r_precip_amt", "m_r_rel_hum_percent", "m_r_sat_precip_amt", "m_r_specific_humidity", "m_r_tdtr_k", "m_s_avg_temp_c", "m_s_diur_temp_rng_c", "m_s_max_temp_c", "m_s_min_temp_c", "m_s_precip_mm")
+```
+
+```{r cols}
+col<-c(4,6:25)
+col1<-c(4,25:49)
+```
+
+```{r sj corrplot}
+#correlation plot for sj
+sjcorr<-cor(sjtrain[,col])
+sjcorr<-round(sjcorr,2)
+
+sjcorr1<-cor(sjtrain[,col1])
+sjcorr1<-round(sjcorr1,2)
+#head(sjcorr)
+```
+
+### Below we see the correlation plots for the San Juan variables in the datset so far. 
+```{r sjcorrplot}
+corrplot(sjcorr, method = "color", type = "upper")
+```
+
+```{r sj corrplot2}
+corrplot(sjcorr1, method = "color", type = "upper")
+```
+
+
+
+
+```{r iq corrplot}
+#correlation plot for iq
+
+iqcorr<-cor(iqtrain[,col])
+iqcorr<-round(iqcorr,2)
+
+iqcorr1<-cor(iqtrain[,col1])
+iqcorr1<-round(iqcorr1,2)
+#head(iqcorr)
+
+```
+
+### Below we see the same correlation plots, but for Iquitos. 
+```{r iq corrplot1}
+corrplot(iqcorr, method = "color", type = "upper")
+```
+
+
+```{r iq corrplot2}
+corrplot(iqcorr1, method = "color", type = "upper")
+```
+
+
+```{r colnames2}
+colnames(sjtrain)
+```
+
+### Now that we've created flag variables, dealt with null values in dataset and have a better idea of which variables are correlated with the target variable of 'total_cases', we will create lag variables for each of these existing variables. We choose to create variable lags of 1 week, 2 weeks, 3 weeks and 4 weeks. We are testing to see if the measured levels of the variables in previous weeks is more predictive than the current week on the total number of dengue cases each week. The lag period is indicated by the numerical suffix, '_1' meaning 1 week lag, '_2' meaning 2 weeks lag, etc. 
+```{r lags}
+##create lagged variables
+sjtrain$lndvi_ne_1<-Lag(sjtrain$ndvi_ne,-1)
+sjtrain$lndvi_ne_2<-Lag(sjtrain$ndvi_ne,-2)
+sjtrain$lndvi_ne_3<-Lag(sjtrain$ndvi_ne,-3)
+sjtrain$lndvi_ne_4<-Lag(sjtrain$ndvi_ne,-4)
+
+iqtrain$lndvi_ne_1<-Lag(iqtrain$ndvi_ne,-1)
+iqtrain$lndvi_ne_2<-Lag(iqtrain$ndvi_ne,-2)
+iqtrain$lndvi_ne_3<-Lag(iqtrain$ndvi_ne,-3)
+iqtrain$lndvi_ne_4<-Lag(iqtrain$ndvi_ne,-4)
+
+##create lagged variables
+sjtest$lndvi_ne_1<-Lag(sjtest$ndvi_ne,-1)
+sjtest$lndvi_ne_2<-Lag(sjtest$ndvi_ne,-2)
+sjtest$lndvi_ne_3<-Lag(sjtest$ndvi_ne,-3)
+sjtest$lndvi_ne_4<-Lag(sjtest$ndvi_ne,-4)
+
+iqtest$lndvi_ne_1<-Lag(iqtest$ndvi_ne,-1)
+iqtest$lndvi_ne_2<-Lag(iqtest$ndvi_ne,-2)
+iqtest$lndvi_ne_3<-Lag(iqtest$ndvi_ne,-3)
+iqtest$lndvi_ne_4<-Lag(iqtest$ndvi_ne,-4)
+```
+
+```{r sj lags}
+#sj
+sjtrain$lndvi_nw_1<-Lag(sjtrain$ndvi_nw, -1)  
+sjtrain$lndvi_nw_2<-Lag(sjtrain$ndvi_nw, -2)   
+sjtrain$lndvi_nw_3<-Lag(sjtrain$ndvi_nw, -3)  
+sjtrain$lndvi_nw_4<-Lag(sjtrain$ndvi_nw, -4)  
+
+sjtrain$lndvi_se_1<-Lag(sjtrain$ndvi_se,-1)
+sjtrain$lndvi_se_2<-Lag(sjtrain$ndvi_se,-2)
+sjtrain$lndvi_se_3<-Lag(sjtrain$ndvi_se,-3)
+sjtrain$lndvi_se_4<-Lag(sjtrain$ndvi_se,-4)
+
+sjtrain$lndvi_sw_1<-Lag(sjtrain$ndvi_sw, -1)
+sjtrain$lndvi_sw_2<-Lag(sjtrain$ndvi_sw, -2)
+sjtrain$lndvi_sw_3<-Lag(sjtrain$ndvi_sw, -3)
+sjtrain$lndvi_sw_4<-Lag(sjtrain$ndvi_sw, -4)
+
+sjtrain$lprecip_amt_mm_1<-Lag(sjtrain$precip_amt_mm, -1)
+sjtrain$lprecip_amt_mm_2<-Lag(sjtrain$precip_amt_mm, -2)
+sjtrain$lprecip_amt_mm_3<-Lag(sjtrain$precip_amt_mm, -3)
+sjtrain$lprecip_amt_mm_4<-Lag(sjtrain$precip_amt_mm, -4)
+
+sjtrain$lr_air_temp_k_1<-Lag(sjtrain$r_air_temp_k, -1)
+sjtrain$lr_air_temp_k_2<-Lag(sjtrain$r_air_temp_k, -2)
+sjtrain$lr_air_temp_k_3<-Lag(sjtrain$r_air_temp_k, -3)
+sjtrain$lr_air_temp_k_4<-Lag(sjtrain$r_air_temp_k, -4)
+
+sjtrain$lr_avg_temp_k_1<-Lag(sjtrain$r_avg_temp_k, -1)
+sjtrain$lr_avg_temp_k_2<-Lag(sjtrain$r_avg_temp_k, -2)
+sjtrain$lr_avg_temp_k_3<-Lag(sjtrain$r_avg_temp_k, -3)
+sjtrain$lr_avg_temp_k_4<-Lag(sjtrain$r_avg_temp_k, -4)
+
+sjtrain$lr_dew_point_temp_k_1<-Lag(sjtrain$r_dew_point_temp_k, -1)
+sjtrain$lr_dew_point_temp_k_2<-Lag(sjtrain$r_dew_point_temp_k, -2)
+sjtrain$lr_dew_point_temp_k_3<-Lag(sjtrain$r_dew_point_temp_k, -3)
+sjtrain$lr_dew_point_temp_k_4<-Lag(sjtrain$r_dew_point_temp_k, -4)
+
+sjtrain$lr_max_air_temp_k_1<-Lag(sjtrain$r_max_air_temp_k, -1)
+sjtrain$lr_max_air_temp_k_2<-Lag(sjtrain$r_max_air_temp_k, -2)
+sjtrain$lr_max_air_temp_k_3<-Lag(sjtrain$r_max_air_temp_k, -3)
+sjtrain$lr_max_air_temp_k_4<-Lag(sjtrain$r_max_air_temp_k, -4)
+
+sjtrain$lr_min_air_temp_k_1<-Lag(sjtrain$r_min_air_temp_k, -1)
+sjtrain$lr_min_air_temp_k_2<-Lag(sjtrain$r_min_air_temp_k, -2)
+sjtrain$lr_min_air_temp_k_3<-Lag(sjtrain$r_min_air_temp_k, -3)
+sjtrain$lr_min_air_temp_k_4<-Lag(sjtrain$r_min_air_temp_k, -4)
+
+sjtrain$lr_precip_amt_1<-Lag(sjtrain$r_precip_amt, -1)
+sjtrain$lr_precip_amt_2<-Lag(sjtrain$r_precip_amt, -2)
+sjtrain$lr_precip_amt_3<-Lag(sjtrain$r_precip_amt, -3)
+sjtrain$lr_precip_amt_4<-Lag(sjtrain$r_precip_amt, -4)
+
+sjtrain$lr_rel_hum_percent_1<-Lag(sjtrain$r_rel_hum_percent,-1)
+sjtrain$lr_rel_hum_percent_2<-Lag(sjtrain$r_rel_hum_percent,-2)
+sjtrain$lr_rel_hum_percent_3<-Lag(sjtrain$r_rel_hum_percent,-3)
+sjtrain$lr_rel_hum_percent_4<-Lag(sjtrain$r_rel_hum_percent,-4)
+
+sjtrain$lr_sat_precip_amt_1<-Lag(sjtrain$r_sat_precip_amt, -1)
+sjtrain$lr_sat_precip_amt_2<-Lag(sjtrain$r_sat_precip_amt, -2)
+sjtrain$lr_sat_precip_amt_3<-Lag(sjtrain$r_sat_precip_amt, -3)
+sjtrain$lr_sat_precip_amt_4<-Lag(sjtrain$r_sat_precip_amt, -4)
+
+sjtrain$lr_specific_humidity_1<-Lag(sjtrain$r_specific_humidity, -1)
+sjtrain$lr_specific_humidity_2<-Lag(sjtrain$r_specific_humidity, -2)
+sjtrain$lr_specific_humidity_3<-Lag(sjtrain$r_specific_humidity, -3)
+sjtrain$lr_specific_humidity_4<-Lag(sjtrain$r_specific_humidity, -4)
+
+sjtrain$lr_tdtr_k_1<-Lag(sjtrain$r_tdtr_k, -1)
+sjtrain$lr_tdtr_k_2<-Lag(sjtrain$r_tdtr_k, -2)
+sjtrain$lr_tdtr_k_3<-Lag(sjtrain$r_tdtr_k, -3)
+sjtrain$lr_tdtr_k_4<-Lag(sjtrain$r_tdtr_k, -4)
+
+sjtrain$ls_avg_temp_c_1<-Lag(sjtrain$s_avg_temp_c, -1)
+sjtrain$ls_avg_temp_c_2<-Lag(sjtrain$s_avg_temp_c, -2)
+sjtrain$ls_avg_temp_c_3<-Lag(sjtrain$s_avg_temp_c, -3)
+sjtrain$ls_avg_temp_c_4<-Lag(sjtrain$s_avg_temp_c, -4)
+
+sjtrain$ls_diur_temp_rng_c_1<-Lag(sjtrain$s_diur_temp_rng_c, -1)
+sjtrain$ls_diur_temp_rng_c_2<-Lag(sjtrain$s_diur_temp_rng_c, -2)
+sjtrain$ls_diur_temp_rng_c_3<-Lag(sjtrain$s_diur_temp_rng_c, -3)
+sjtrain$ls_diur_temp_rng_c_4<-Lag(sjtrain$s_diur_temp_rng_c, -4)
+
+sjtrain$ls_max_temp_c_1<-Lag(sjtrain$s_max_temp_c, -1)
+sjtrain$ls_max_temp_c_2<-Lag(sjtrain$s_max_temp_c, -2)
+sjtrain$ls_max_temp_c_3<-Lag(sjtrain$s_max_temp_c, -3)
+sjtrain$ls_max_temp_c_4<-Lag(sjtrain$s_max_temp_c, -4)
+
+sjtrain$ls_min_temp_c_1<-Lag(sjtrain$s_min_temp_c, -1)
+sjtrain$ls_min_temp_c_2<-Lag(sjtrain$s_min_temp_c, -2)
+sjtrain$ls_min_temp_c_3<-Lag(sjtrain$s_min_temp_c, -3)
+sjtrain$ls_min_temp_c_4<-Lag(sjtrain$s_min_temp_c, -4)
+
+sjtrain$ls_precip_mm_1<-Lag(sjtrain$s_precip_mm, -1)
+sjtrain$ls_precip_mm_2<-Lag(sjtrain$s_precip_mm, -2)
+sjtrain$ls_precip_mm_3<-Lag(sjtrain$s_precip_mm, -3)
+sjtrain$ls_precip_mm_4<-Lag(sjtrain$s_precip_mm, -4)
+
+#test
+sjtest$lndvi_nw_1<-Lag(sjtest$ndvi_nw, -1)  
+sjtest$lndvi_nw_2<-Lag(sjtest$ndvi_nw, -2)   
+sjtest$lndvi_nw_3<-Lag(sjtest$ndvi_nw, -3)  
+sjtest$lndvi_nw_4<-Lag(sjtest$ndvi_nw, -4)  
+
+sjtest$lndvi_se_1<-Lag(sjtest$ndvi_se,-1)
+sjtest$lndvi_se_2<-Lag(sjtest$ndvi_se,-2)
+sjtest$lndvi_se_3<-Lag(sjtest$ndvi_se,-3)
+sjtest$lndvi_se_4<-Lag(sjtest$ndvi_se,-4)
+
+sjtest$lndvi_sw_1<-Lag(sjtest$ndvi_sw, -1)
+sjtest$lndvi_sw_2<-Lag(sjtest$ndvi_sw, -2)
+sjtest$lndvi_sw_3<-Lag(sjtest$ndvi_sw, -3)
+sjtest$lndvi_sw_4<-Lag(sjtest$ndvi_sw, -4)
+
+sjtest$lprecip_amt_mm_1<-Lag(sjtest$precip_amt_mm, -1)
+sjtest$lprecip_amt_mm_2<-Lag(sjtest$precip_amt_mm, -2)
+sjtest$lprecip_amt_mm_3<-Lag(sjtest$precip_amt_mm, -3)
+sjtest$lprecip_amt_mm_4<-Lag(sjtest$precip_amt_mm, -4)
+
+sjtest$lr_air_temp_k_1<-Lag(sjtest$r_air_temp_k, -1)
+sjtest$lr_air_temp_k_2<-Lag(sjtest$r_air_temp_k, -2)
+sjtest$lr_air_temp_k_3<-Lag(sjtest$r_air_temp_k, -3)
+sjtest$lr_air_temp_k_4<-Lag(sjtest$r_air_temp_k, -4)
+
+sjtest$lr_avg_temp_k_1<-Lag(sjtest$r_avg_temp_k, -1)
+sjtest$lr_avg_temp_k_2<-Lag(sjtest$r_avg_temp_k, -2)
+sjtest$lr_avg_temp_k_3<-Lag(sjtest$r_avg_temp_k, -3)
+sjtest$lr_avg_temp_k_4<-Lag(sjtest$r_avg_temp_k, -4)
+
+sjtest$lr_dew_point_temp_k_1<-Lag(sjtest$r_dew_point_temp_k, -1)
+sjtest$lr_dew_point_temp_k_2<-Lag(sjtest$r_dew_point_temp_k, -2)
+sjtest$lr_dew_point_temp_k_3<-Lag(sjtest$r_dew_point_temp_k, -3)
+sjtest$lr_dew_point_temp_k_4<-Lag(sjtest$r_dew_point_temp_k, -4)
+
+sjtest$lr_max_air_temp_k_1<-Lag(sjtest$r_max_air_temp_k, -1)
+sjtest$lr_max_air_temp_k_2<-Lag(sjtest$r_max_air_temp_k, -2)
+sjtest$lr_max_air_temp_k_3<-Lag(sjtest$r_max_air_temp_k, -3)
+sjtest$lr_max_air_temp_k_4<-Lag(sjtest$r_max_air_temp_k, -4)
+
+sjtest$lr_min_air_temp_k_1<-Lag(sjtest$r_min_air_temp_k, -1)
+sjtest$lr_min_air_temp_k_2<-Lag(sjtest$r_min_air_temp_k, -2)
+sjtest$lr_min_air_temp_k_3<-Lag(sjtest$r_min_air_temp_k, -3)
+sjtest$lr_min_air_temp_k_4<-Lag(sjtest$r_min_air_temp_k, -4)
+
+sjtest$lr_precip_amt_1<-Lag(sjtest$r_precip_amt, -1)
+sjtest$lr_precip_amt_2<-Lag(sjtest$r_precip_amt, -2)
+sjtest$lr_precip_amt_3<-Lag(sjtest$r_precip_amt, -3)
+sjtest$lr_precip_amt_4<-Lag(sjtest$r_precip_amt, -4)
+
+sjtest$lr_rel_hum_percent_1<-Lag(sjtest$r_rel_hum_percent,-1)
+sjtest$lr_rel_hum_percent_2<-Lag(sjtest$r_rel_hum_percent,-2)
+sjtest$lr_rel_hum_percent_3<-Lag(sjtest$r_rel_hum_percent,-3)
+sjtest$lr_rel_hum_percent_4<-Lag(sjtest$r_rel_hum_percent,-4)
+
+sjtest$lr_sat_precip_amt_1<-Lag(sjtest$r_sat_precip_amt, -1)
+sjtest$lr_sat_precip_amt_2<-Lag(sjtest$r_sat_precip_amt, -2)
+sjtest$lr_sat_precip_amt_3<-Lag(sjtest$r_sat_precip_amt, -3)
+sjtest$lr_sat_precip_amt_4<-Lag(sjtest$r_sat_precip_amt, -4)
+
+sjtest$lr_specific_humidity_1<-Lag(sjtest$r_specific_humidity, -1)
+sjtest$lr_specific_humidity_2<-Lag(sjtest$r_specific_humidity, -2)
+sjtest$lr_specific_humidity_3<-Lag(sjtest$r_specific_humidity, -3)
+sjtest$lr_specific_humidity_4<-Lag(sjtest$r_specific_humidity, -4)
+
+sjtest$lr_tdtr_k_1<-Lag(sjtest$r_tdtr_k, -1)
+sjtest$lr_tdtr_k_2<-Lag(sjtest$r_tdtr_k, -2)
+sjtest$lr_tdtr_k_3<-Lag(sjtest$r_tdtr_k, -3)
+sjtest$lr_tdtr_k_4<-Lag(sjtest$r_tdtr_k, -4)
+
+sjtest$ls_avg_temp_c_1<-Lag(sjtest$s_avg_temp_c, -1)
+sjtest$ls_avg_temp_c_2<-Lag(sjtest$s_avg_temp_c, -2)
+sjtest$ls_avg_temp_c_3<-Lag(sjtest$s_avg_temp_c, -3)
+sjtest$ls_avg_temp_c_4<-Lag(sjtest$s_avg_temp_c, -4)
+
+sjtest$ls_diur_temp_rng_c_1<-Lag(sjtest$s_diur_temp_rng_c, -1)
+sjtest$ls_diur_temp_rng_c_2<-Lag(sjtest$s_diur_temp_rng_c, -2)
+sjtest$ls_diur_temp_rng_c_3<-Lag(sjtest$s_diur_temp_rng_c, -3)
+sjtest$ls_diur_temp_rng_c_4<-Lag(sjtest$s_diur_temp_rng_c, -4)
+
+sjtest$ls_max_temp_c_1<-Lag(sjtest$s_max_temp_c, -1)
+sjtest$ls_max_temp_c_2<-Lag(sjtest$s_max_temp_c, -2)
+sjtest$ls_max_temp_c_3<-Lag(sjtest$s_max_temp_c, -3)
+sjtest$ls_max_temp_c_4<-Lag(sjtest$s_max_temp_c, -4)
+
+sjtest$ls_min_temp_c_1<-Lag(sjtest$s_min_temp_c, -1)
+sjtest$ls_min_temp_c_2<-Lag(sjtest$s_min_temp_c, -2)
+sjtest$ls_min_temp_c_3<-Lag(sjtest$s_min_temp_c, -3)
+sjtest$ls_min_temp_c_4<-Lag(sjtest$s_min_temp_c, -4)
+
+sjtest$ls_precip_mm_1<-Lag(sjtest$s_precip_mm, -1)
+sjtest$ls_precip_mm_2<-Lag(sjtest$s_precip_mm, -2)
+sjtest$ls_precip_mm_3<-Lag(sjtest$s_precip_mm, -3)
+sjtest$ls_precip_mm_4<-Lag(sjtest$s_precip_mm, -4)
+```
+
+```{r iq lags}
+#iq
+iqtrain$lndvi_nw_1<-Lag(iqtrain$ndvi_nw, -1)  
+iqtrain$lndvi_nw_2<-Lag(iqtrain$ndvi_nw, -2)   
+iqtrain$lndvi_nw_3<-Lag(iqtrain$ndvi_nw, -3)  
+iqtrain$lndvi_nw_4<-Lag(iqtrain$ndvi_nw, -4)  
+
+iqtrain$lndvi_se_1<-Lag(iqtrain$ndvi_se,-1)
+iqtrain$lndvi_se_2<-Lag(iqtrain$ndvi_se,-2)
+iqtrain$lndvi_se_3<-Lag(iqtrain$ndvi_se,-3)
+iqtrain$lndvi_se_4<-Lag(iqtrain$ndvi_se,-4)
+
+iqtrain$lndvi_sw_1<-Lag(iqtrain$ndvi_sw, -1)
+iqtrain$lndvi_sw_2<-Lag(iqtrain$ndvi_sw, -2)
+iqtrain$lndvi_sw_3<-Lag(iqtrain$ndvi_sw, -3)
+iqtrain$lndvi_sw_4<-Lag(iqtrain$ndvi_sw, -4)
+
+iqtrain$lprecip_amt_mm_1<-Lag(iqtrain$precip_amt_mm, -1)
+iqtrain$lprecip_amt_mm_2<-Lag(iqtrain$precip_amt_mm, -2)
+iqtrain$lprecip_amt_mm_3<-Lag(iqtrain$precip_amt_mm, -3)
+iqtrain$lprecip_amt_mm_4<-Lag(iqtrain$precip_amt_mm, -4)
+
+iqtrain$lr_air_temp_k_1<-Lag(iqtrain$r_air_temp_k, -1)
+iqtrain$lr_air_temp_k_2<-Lag(iqtrain$r_air_temp_k, -2)
+iqtrain$lr_air_temp_k_3<-Lag(iqtrain$r_air_temp_k, -3)
+iqtrain$lr_air_temp_k_4<-Lag(iqtrain$r_air_temp_k, -4)
+
+iqtrain$lr_avg_temp_k_1<-Lag(iqtrain$r_avg_temp_k, -1)
+iqtrain$lr_avg_temp_k_2<-Lag(iqtrain$r_avg_temp_k, -2)
+iqtrain$lr_avg_temp_k_3<-Lag(iqtrain$r_avg_temp_k, -3)
+iqtrain$lr_avg_temp_k_4<-Lag(iqtrain$r_avg_temp_k, -4)
+
+iqtrain$lr_dew_point_temp_k_1<-Lag(iqtrain$r_dew_point_temp_k, -1)
+iqtrain$lr_dew_point_temp_k_2<-Lag(iqtrain$r_dew_point_temp_k, -2)
+iqtrain$lr_dew_point_temp_k_3<-Lag(iqtrain$r_dew_point_temp_k, -3)
+iqtrain$lr_dew_point_temp_k_4<-Lag(iqtrain$r_dew_point_temp_k, -4)
+
+iqtrain$lr_max_air_temp_k_1<-Lag(iqtrain$r_max_air_temp_k, -1)
+iqtrain$lr_max_air_temp_k_2<-Lag(iqtrain$r_max_air_temp_k, -2)
+iqtrain$lr_max_air_temp_k_3<-Lag(iqtrain$r_max_air_temp_k, -3)
+iqtrain$lr_max_air_temp_k_4<-Lag(iqtrain$r_max_air_temp_k, -4)
+
+iqtrain$lr_min_air_temp_k_1<-Lag(iqtrain$r_min_air_temp_k, -1)
+iqtrain$lr_min_air_temp_k_2<-Lag(iqtrain$r_min_air_temp_k, -2)
+iqtrain$lr_min_air_temp_k_3<-Lag(iqtrain$r_min_air_temp_k, -3)
+iqtrain$lr_min_air_temp_k_4<-Lag(iqtrain$r_min_air_temp_k, -4)
+
+iqtrain$lr_precip_amt_1<-Lag(iqtrain$r_precip_amt, -1)
+iqtrain$lr_precip_amt_2<-Lag(iqtrain$r_precip_amt, -2)
+iqtrain$lr_precip_amt_3<-Lag(iqtrain$r_precip_amt, -3)
+iqtrain$lr_precip_amt_4<-Lag(iqtrain$r_precip_amt, -4)
+
+iqtrain$lr_rel_hum_percent_1<-Lag(iqtrain$r_rel_hum_percent,-1)
+iqtrain$lr_rel_hum_percent_2<-Lag(iqtrain$r_rel_hum_percent,-2)
+iqtrain$lr_rel_hum_percent_3<-Lag(iqtrain$r_rel_hum_percent,-3)
+iqtrain$lr_rel_hum_percent_4<-Lag(iqtrain$r_rel_hum_percent,-4)
+
+iqtrain$lr_sat_precip_amt_1<-Lag(iqtrain$r_sat_precip_amt, -1)
+iqtrain$lr_sat_precip_amt_2<-Lag(iqtrain$r_sat_precip_amt, -2)
+iqtrain$lr_sat_precip_amt_3<-Lag(iqtrain$r_sat_precip_amt, -3)
+iqtrain$lr_sat_precip_amt_4<-Lag(iqtrain$r_sat_precip_amt, -4)
+
+iqtrain$lr_specific_humidity_1<-Lag(iqtrain$r_specific_humidity, -1)
+iqtrain$lr_specific_humidity_2<-Lag(iqtrain$r_specific_humidity, -2)
+iqtrain$lr_specific_humidity_3<-Lag(iqtrain$r_specific_humidity, -3)
+iqtrain$lr_specific_humidity_4<-Lag(iqtrain$r_specific_humidity, -4)
+
+iqtrain$lr_tdtr_k_1<-Lag(iqtrain$r_tdtr_k, -1)
+iqtrain$lr_tdtr_k_2<-Lag(iqtrain$r_tdtr_k, -2)
+iqtrain$lr_tdtr_k_3<-Lag(iqtrain$r_tdtr_k, -3)
+iqtrain$lr_tdtr_k_4<-Lag(iqtrain$r_tdtr_k, -4)
+
+iqtrain$ls_avg_temp_c_1<-Lag(iqtrain$s_avg_temp_c, -1)
+iqtrain$ls_avg_temp_c_2<-Lag(iqtrain$s_avg_temp_c, -2)
+iqtrain$ls_avg_temp_c_3<-Lag(iqtrain$s_avg_temp_c, -3)
+iqtrain$ls_avg_temp_c_4<-Lag(iqtrain$s_avg_temp_c, -4)
+
+iqtrain$ls_diur_temp_rng_c_1<-Lag(iqtrain$s_diur_temp_rng_c, -1)
+iqtrain$ls_diur_temp_rng_c_2<-Lag(iqtrain$s_diur_temp_rng_c, -2)
+iqtrain$ls_diur_temp_rng_c_3<-Lag(iqtrain$s_diur_temp_rng_c, -3)
+iqtrain$ls_diur_temp_rng_c_4<-Lag(iqtrain$s_diur_temp_rng_c, -4)
+
+iqtrain$ls_max_temp_c_1<-Lag(iqtrain$s_max_temp_c, -1)
+iqtrain$ls_max_temp_c_2<-Lag(iqtrain$s_max_temp_c, -2)
+iqtrain$ls_max_temp_c_3<-Lag(iqtrain$s_max_temp_c, -3)
+iqtrain$ls_max_temp_c_4<-Lag(iqtrain$s_max_temp_c, -4)
+
+iqtrain$ls_min_temp_c_1<-Lag(iqtrain$s_min_temp_c, -1)
+iqtrain$ls_min_temp_c_2<-Lag(iqtrain$s_min_temp_c, -2)
+iqtrain$ls_min_temp_c_3<-Lag(iqtrain$s_min_temp_c, -3)
+iqtrain$ls_min_temp_c_4<-Lag(iqtrain$s_min_temp_c, -4)
+
+iqtrain$ls_precip_mm_1<-Lag(iqtrain$s_precip_mm, -1)
+iqtrain$ls_precip_mm_2<-Lag(iqtrain$s_precip_mm, -2)
+iqtrain$ls_precip_mm_3<-Lag(iqtrain$s_precip_mm, -3)
+iqtrain$ls_precip_mm_4<-Lag(iqtrain$s_precip_mm, -4)
+
+#test
+
+#iq
+iqtest$lndvi_nw_1<-Lag(iqtest$ndvi_nw, -1)  
+iqtest$lndvi_nw_2<-Lag(iqtest$ndvi_nw, -2)   
+iqtest$lndvi_nw_3<-Lag(iqtest$ndvi_nw, -3)  
+iqtest$lndvi_nw_4<-Lag(iqtest$ndvi_nw, -4)  
+
+iqtest$lndvi_se_1<-Lag(iqtest$ndvi_se,-1)
+iqtest$lndvi_se_2<-Lag(iqtest$ndvi_se,-2)
+iqtest$lndvi_se_3<-Lag(iqtest$ndvi_se,-3)
+iqtest$lndvi_se_4<-Lag(iqtest$ndvi_se,-4)
+
+iqtest$lndvi_sw_1<-Lag(iqtest$ndvi_sw, -1)
+iqtest$lndvi_sw_2<-Lag(iqtest$ndvi_sw, -2)
+iqtest$lndvi_sw_3<-Lag(iqtest$ndvi_sw, -3)
+iqtest$lndvi_sw_4<-Lag(iqtest$ndvi_sw, -4)
+
+iqtest$lprecip_amt_mm_1<-Lag(iqtest$precip_amt_mm, -1)
+iqtest$lprecip_amt_mm_2<-Lag(iqtest$precip_amt_mm, -2)
+iqtest$lprecip_amt_mm_3<-Lag(iqtest$precip_amt_mm, -3)
+iqtest$lprecip_amt_mm_4<-Lag(iqtest$precip_amt_mm, -4)
+
+iqtest$lr_air_temp_k_1<-Lag(iqtest$r_air_temp_k, -1)
+iqtest$lr_air_temp_k_2<-Lag(iqtest$r_air_temp_k, -2)
+iqtest$lr_air_temp_k_3<-Lag(iqtest$r_air_temp_k, -3)
+iqtest$lr_air_temp_k_4<-Lag(iqtest$r_air_temp_k, -4)
+
+iqtest$lr_avg_temp_k_1<-Lag(iqtest$r_avg_temp_k, -1)
+iqtest$lr_avg_temp_k_2<-Lag(iqtest$r_avg_temp_k, -2)
+iqtest$lr_avg_temp_k_3<-Lag(iqtest$r_avg_temp_k, -3)
+iqtest$lr_avg_temp_k_4<-Lag(iqtest$r_avg_temp_k, -4)
+
+iqtest$lr_dew_point_temp_k_1<-Lag(iqtest$r_dew_point_temp_k, -1)
+iqtest$lr_dew_point_temp_k_2<-Lag(iqtest$r_dew_point_temp_k, -2)
+iqtest$lr_dew_point_temp_k_3<-Lag(iqtest$r_dew_point_temp_k, -3)
+iqtest$lr_dew_point_temp_k_4<-Lag(iqtest$r_dew_point_temp_k, -4)
+
+iqtest$lr_max_air_temp_k_1<-Lag(iqtest$r_max_air_temp_k, -1)
+iqtest$lr_max_air_temp_k_2<-Lag(iqtest$r_max_air_temp_k, -2)
+iqtest$lr_max_air_temp_k_3<-Lag(iqtest$r_max_air_temp_k, -3)
+iqtest$lr_max_air_temp_k_4<-Lag(iqtest$r_max_air_temp_k, -4)
+
+iqtest$lr_min_air_temp_k_1<-Lag(iqtest$r_min_air_temp_k, -1)
+iqtest$lr_min_air_temp_k_2<-Lag(iqtest$r_min_air_temp_k, -2)
+iqtest$lr_min_air_temp_k_3<-Lag(iqtest$r_min_air_temp_k, -3)
+iqtest$lr_min_air_temp_k_4<-Lag(iqtest$r_min_air_temp_k, -4)
+
+iqtest$lr_precip_amt_1<-Lag(iqtest$r_precip_amt, -1)
+iqtest$lr_precip_amt_2<-Lag(iqtest$r_precip_amt, -2)
+iqtest$lr_precip_amt_3<-Lag(iqtest$r_precip_amt, -3)
+iqtest$lr_precip_amt_4<-Lag(iqtest$r_precip_amt, -4)
+
+iqtest$lr_rel_hum_percent_1<-Lag(iqtest$r_rel_hum_percent,-1)
+iqtest$lr_rel_hum_percent_2<-Lag(iqtest$r_rel_hum_percent,-2)
+iqtest$lr_rel_hum_percent_3<-Lag(iqtest$r_rel_hum_percent,-3)
+iqtest$lr_rel_hum_percent_4<-Lag(iqtest$r_rel_hum_percent,-4)
+
+iqtest$lr_sat_precip_amt_1<-Lag(iqtest$r_sat_precip_amt, -1)
+iqtest$lr_sat_precip_amt_2<-Lag(iqtest$r_sat_precip_amt, -2)
+iqtest$lr_sat_precip_amt_3<-Lag(iqtest$r_sat_precip_amt, -3)
+iqtest$lr_sat_precip_amt_4<-Lag(iqtest$r_sat_precip_amt, -4)
+
+iqtest$lr_specific_humidity_1<-Lag(iqtest$r_specific_humidity, -1)
+iqtest$lr_specific_humidity_2<-Lag(iqtest$r_specific_humidity, -2)
+iqtest$lr_specific_humidity_3<-Lag(iqtest$r_specific_humidity, -3)
+iqtest$lr_specific_humidity_4<-Lag(iqtest$r_specific_humidity, -4)
+
+iqtest$lr_tdtr_k_1<-Lag(iqtest$r_tdtr_k, -1)
+iqtest$lr_tdtr_k_2<-Lag(iqtest$r_tdtr_k, -2)
+iqtest$lr_tdtr_k_3<-Lag(iqtest$r_tdtr_k, -3)
+iqtest$lr_tdtr_k_4<-Lag(iqtest$r_tdtr_k, -4)
+
+iqtest$ls_avg_temp_c_1<-Lag(iqtest$s_avg_temp_c, -1)
+iqtest$ls_avg_temp_c_2<-Lag(iqtest$s_avg_temp_c, -2)
+iqtest$ls_avg_temp_c_3<-Lag(iqtest$s_avg_temp_c, -3)
+iqtest$ls_avg_temp_c_4<-Lag(iqtest$s_avg_temp_c, -4)
+
+iqtest$ls_diur_temp_rng_c_1<-Lag(iqtest$s_diur_temp_rng_c, -1)
+iqtest$ls_diur_temp_rng_c_2<-Lag(iqtest$s_diur_temp_rng_c, -2)
+iqtest$ls_diur_temp_rng_c_3<-Lag(iqtest$s_diur_temp_rng_c, -3)
+iqtest$ls_diur_temp_rng_c_4<-Lag(iqtest$s_diur_temp_rng_c, -4)
+
+iqtest$ls_max_temp_c_1<-Lag(iqtest$s_max_temp_c, -1)
+iqtest$ls_max_temp_c_2<-Lag(iqtest$s_max_temp_c, -2)
+iqtest$ls_max_temp_c_3<-Lag(iqtest$s_max_temp_c, -3)
+iqtest$ls_max_temp_c_4<-Lag(iqtest$s_max_temp_c, -4)
+
+iqtest$ls_min_temp_c_1<-Lag(iqtest$s_min_temp_c, -1)
+iqtest$ls_min_temp_c_2<-Lag(iqtest$s_min_temp_c, -2)
+iqtest$ls_min_temp_c_3<-Lag(iqtest$s_min_temp_c, -3)
+iqtest$ls_min_temp_c_4<-Lag(iqtest$s_min_temp_c, -4)
+
+iqtest$ls_precip_mm_1<-Lag(iqtest$s_precip_mm, -1)
+iqtest$ls_precip_mm_2<-Lag(iqtest$s_precip_mm, -2)
+iqtest$ls_precip_mm_3<-Lag(iqtest$s_precip_mm, -3)
+iqtest$ls_precip_mm_4<-Lag(iqtest$s_precip_mm, -4)
+```
+
+```{r colnames1}
+colnames(sjtrain)
+```
+
+```{r}
+#null values?
+colSums(is.na(sjtrain))
+```
+
+```{r repl null}
+#Fix null values. Whats the best way? 
+
+#replace null values with the previous value in each column
+sjtrain<-na.locf(sjtrain)
+iqtrain<-na.locf(iqtrain)
+
+#replace null values with the previous value in each column
+sjtest<-na.locf(sjtest)
+iqtest<-na.locf(iqtest)
+```
+
+```{r convert}
+##convert chr to num
+colum<-c(2:4,6:129)
+sjtrain[,colum] <- lapply(sjtrain[,colum], function(x) as.numeric(as.character(x)))
+iqtrain[,colum] <- lapply(iqtrain[,colum], function(x) as.numeric(as.character(x)))
+
+sjtest[,colum] <- lapply(sjtest[,colum], function(x) as.numeric(as.character(x)))
+iqtest[,colum] <- lapply(iqtest[,colum], function(x) as.numeric(as.character(x)))
+```
+
+```{r}
+tail(sjtrain)
+```
+
+```{r str sj}
+str(sjtrain)
+```
+
+```{r str iq}
+str(iqtrain)
+```
+
+```{r l corr}
+#Check correlation of lagged variables with total_cases
+col<-c(4,6:25)
+col1<-c(4,25:50)
+col2<-c(4,51:75)
+col3<-c(4,76:100)
+col4<-c(4,101:129)
+```
+
+```{r sj corr}
+#correlation plot for sj
+sjcorr<-cor(sjtrain[,col])
+sjcorr<-round(sjcorr,2)
+
+sjcorr1<-cor(sjtrain[,col1])
+sjcorr1<-round(sjcorr1,2)
+
+sjcorr2<-cor(sjtrain[,col2])
+sjcorr2<-round(sjcorr2,2)
+
+sjcorr3<-cor(sjtrain[,col3])
+sjcorr3<-round(sjcorr3,2)
+
+sjcorr4<-cor(sjtrain[,col4])
+sjcorr4<-round(sjcorr4,2)
+```
+
+```{r iq corr}
+#correlation plot for sj
+iqcorr<-cor(iqtrain[,col])
+iqcorr<-round(iqcorr,2)
+
+iqcorr1<-cor(iqtrain[,col1])
+iqcorr1<-round(iqcorr1,2)
+
+iqcorr2<-cor(iqtrain[,col2])
+iqcorr2<-round(iqcorr2,2)
+
+iqcorr3<-cor(iqtrain[,col3])
+iqcorr3<-round(iqcorr3,2)
+
+iqcorr4<-cor(iqtrain[,col4])
+iqcorr4<-round(iqcorr4,2)
+```
+
+### Below we see the correlation plots for each lag variable created in relation to total_cases
+```{r sj corr plot_1}
+corrplot(sjcorr, method = "color", type = "upper")
+```
+
+```{r iq corr plot_1}
+corrplot(iqcorr, method = "color", type = "upper")
+```
+
+```{r sj corr plot1}
+corrplot(sjcorr1, method = "color", type = "upper")
+```
+
+```{r iq corr plot1}
+corrplot(iqcorr1, method = "color", type = "upper")
+```
+
+```{r sj corr plot2}
+corrplot(sjcorr2, method = "color", type = "upper")
+```
+
+```{r iq corr plot2}
+corrplot(iqcorr2, method = "color", type = "upper")
+```
+
+```{r sj corr plot3}
+corrplot(sjcorr3, method = "color", type = "upper")
+```
+
+```{r iq corr plot3}
+corrplot(iqcorr3, method = "color", type = "upper")
+```
+
+```{r sj corr plot4}
+corrplot(sjcorr4, method = "color", type = "upper")
+```
+
+```{r iq corr plot4}
+corrplot(iqcorr4, method = "color", type = "upper")
+```
+
+### The last bit of feature engineering done is in creating some new variables: tempchange, avg_prec, prec_hum and prec_hum_temp. The variable tempchange is the max temperature in a week minus the minimum temperature in the same week. avg_prec is the sum of all 4 different precipitaiton measures, divided by 4, or the average precipitation, as measured by 4 different datasets. prec_hum is an interaction term between precipitaiton and humidity. Finally, prec_hum_temp is an interaction term between precipitaiton, humidity and temperature. 
+```{r feature engineering}
+#feature engineering?? 
+#temp change= max temp- min temp
+sjtrain$tempchange<-sjtrain$s_max_temp_c-sjtrain$s_min_temp_c
+iqtrain$tempchange<-iqtrain$s_max_temp_c-iqtrain$s_min_temp_c
+
+#avg precip = s_precip + r_precip + r_precip_amt / 3
+sjtrain$avg_prec<-(sjtrain$s_precip_mm + sjtrain$r_precip_amt + sjtrain$r_sat_precip_amt +sjtrain$precip_amt_mm)/4
+iqtrain$avg_prec<-(iqtrain$s_precip_mm + iqtrain$r_precip_amt + iqtrain$r_sat_precip_amt +iqtrain$precip_amt_mm)/4
+
+#avg precip (but for lagged precip variables)
+
+#prec_hum = precip*humidity
+sjtrain$prec_hum<-sjtrain$r_rel_hum_percent*sjtrain$r_precip_amt
+iqtrain$prec_hum<-iqtrain$r_rel_hum_percent*iqtrain$r_precip_amt
+
+#prec_hum_temp = precip*humidity*temperature
+sjtrain$prec_hum_temp<-sjtrain$r_rel_hum_percent*sjtrain$r_precip_amt*sjtrain$r_air_temp_k
+iqtrain$prec_hum_temp<-iqtrain$r_rel_hum_percent*iqtrain$r_precip_amt*iqtrain$r_air_temp_k
+
+
+#test
+#temp change= max temp- min temp
+sjtest$tempchange<-sjtest$s_max_temp_c-sjtest$s_min_temp_c
+iqtest$tempchange<-iqtest$s_max_temp_c-iqtest$s_min_temp_c
+
+#avg precip = s_precip + r_precip + r_precip_amt / 3
+sjtest$avg_prec<-(sjtest$s_precip_mm + sjtest$r_precip_amt + sjtest$r_sat_precip_amt +sjtest$precip_amt_mm)/4
+iqtest$avg_prec<-(iqtest$s_precip_mm + iqtest$r_precip_amt + iqtest$r_sat_precip_amt +iqtest$precip_amt_mm)/4
+
+#avg precip (but for lagged precip variables)
+
+#prec_hum = precip*humidity
+sjtest$prec_hum<-sjtest$r_rel_hum_percent*sjtest$r_precip_amt
+iqtest$prec_hum<-iqtest$r_rel_hum_percent*iqtest$r_precip_amt
+
+#prec_hum_temp = precip*humidity*temperature
+sjtest$prec_hum_temp<-sjtest$r_rel_hum_percent*sjtest$r_precip_amt*sjtest$r_air_temp_k
+iqtest$prec_hum_temp<-iqtest$r_rel_hum_percent*iqtest$r_precip_amt*iqtest$r_air_temp_k
+```
+
+```{r}
+str(sjtrain)
+```
+
+```{r corr fe}
+col<-c(4,130:133)
+
+sjcorr<-cor(sjtrain[,col])
+sjcorr<-round(sjcorr,2)
+
+iqcorr<-cor(iqtrain[,col])
+iqcorr<-round(iqcorr,2)
+```
+
+### The correlation of these new variables is shown in the plots below. None of these variables appear to be particularly correlated with 'total_cases' in San Juan or Iquitos. 
+```{r sj fe corr plot}
+corrplot(sjcorr, method = "color", type = "upper")
+```
+
+```{r iq fe corr plot}
+corrplot(iqcorr, method = "color", type = "upper")
+```
+
+```{r, include=FALSE}
+#write.csv(sjtrain, 'sjtrain.csv')
+#write.csv(iqtrain, 'iqtrain.csv')
+
+#write.csv(sjtest, 'sjtest.csv')
+#write.csv(iqtest, 'iqtest.csv')
+```
+
+```{r}
+#create dummy variables
+colnames(sjtrain)
+```
+
+```{r}
+colnames(iqtrain)
+```
+
+##Type of Models:
+### In determining what models to use to predict total cases of dengue fever by week in San Juan and Iquitos, I felt the need to attempt to analyze using time series specific models, such as ARIMA and NNAR. These models were selected for their ability to model seasonal and cyclical trends, which is present in both the San Juan data and the Iquitos data. Another model I chose to use in addressing this problem was a Random Forest. Since there are a large number of variables with an impat on the total number of dengue cases, the possibility for the random forest to identify relationships and decision branches that other models may not be as sensitive to. Finally, I chose to use an Ordinary Least Squared models, as it provides a good benchmark model and is a good place to start. If the OLS model adequately models the relationship, there is no need to attempt other models, or complicate the analysis. 
+
+##Formulation
+###First, I implemented the OLS Model in Python. In the OLS Model, I had to very careful about collinearity as many of the variables in the dataset have a higher correlaiton coefficient with other variables than to the targe variable of 'total_cases'. Due to the concern about collinearity, only a few variables were maintained in each model. Also, the models for San Juan and Iquitos are different. This is beacuse different variables impact the total dengue cases each week in each city. The code can be found below:
+
+###Next, I implemented an ARIMA model. This model did not include any outside variables, and looked only at the total cases by city over time. In the below summary of the model we see that the ARIMA model for San Juan  
+```{r}
+sjarima<-forecast(auto.arima(ts.sjtrain),h=260)
+summary(sjarima)
+```
+
+### In the ARIMA model for Iquitos, we notice that 
+```{r}
+iqarima<-forecast(auto.arima(ts.iqtrain),h=156)
+summary(iqarima)
+
+```
+
+
+### Next I implemented an ARIMAX model. This model includes a single external variable. For teh San Juan ARIMAX model, we use the flag variable 'm_ndvi_se', which captures the impact of a missing value in teh 'ndvi_se' column. This variable was chosen becaue of its high correlaiton with total_cases in San Juan of 0.59. 
+```{r}
+#m_ndvi_se
+sj_arimax<-forecast(auto.arima(ts.sjtrain, xreg= sjtrain$m_ndvi_se),xreg= sjtrain$m_ndvi_se, h=260)
+
+```
+
+```{r}
+summary(sj_arimax)
+```
+
+### The lag variable of lr_specific_humidity_2 had the highest correlation to total cases in Iquitos and was utilized in the Iquitos ARIMAX model. 
+```{r}
+iq_arimax<-forecast(auto.arima(ts.iqtrain, xreg=iqtrain$lr_specific_humidity_2), xreg=iqtrain$lr_specific_humidity_2, h=156)
+
+```
+
+```{r}
+summary(iq_arimax)
+```
+
+
+```{r}
+#r_specific_humidity
+sjarimax2<-forecast(auto.arima(ts.sjtrain, xreg= sjtrain$r_specific_humidity),xreg= sjtrain$r_specific_humidity,h=260)
+```
+
+```{r}
+summary(sjarimax2)
+```
+
+##nnar
+```{r}
+nntsj<-nnetar(ts.sjtrain)
+```
+
+```{r}
+nntiq<-nnetar(ts.iqtrain)
+```
+
+
+
+##Performance/Accuracy
+###
+
+```{r}
+accuracy(sjarima)
+```
+
+```{r}
+accuracy(iqarima)
+```
+
+```{r, include=FALSE}
+#results form models
+#sjpred1<-round(sjarima$mean)
+#sj_arima<-data.frame(city='sj',
+#                    year=sjtest$year,
+#                    week=sjtest$weekofyear,
+#                    total_cases=round(sjarima$mean))
+#iq_arima<-data.frame(city='iq',
+#                    year=iqtest$year,
+#                    week=iqtest$weekofyear,
+#                    total_cases=round(iqarima$mean))
+```
+
+```{r, include=FALSE}
+#library(dplyr)
+#straight<-union_all(sj_arima, iq_arima)
+#head(straight)
+```
+
+```{r, include=FALSE}
+#export results
+#write.csv(straight, "~/arima.csv")
+```
+
+```{r, include=FALSE}
+#drop variables and get correlaitons
+#sjtrain = subset(sjtrain, select = -c(city,week_start_date) )
+#iqtrain = subset(iqtrain, select = -c(city,week_start_date) )
+#sjtest = subset(sjtest, select = -c(city,week_start_date) )
+#iqtest = subset(iqtest, select = -c(city,week_start_date) )
+```
+
+```{r, include=FALSE}
+#cor(sjtrain)
+```
+
+```{r, include=FALSE}
+#cor(iqtrain)
+```
+
+
+```{r}
+accuracy(sj_arimax)
+```
+
+```{r}
+accuracy(iq_arimax)
+```
+
+
+```{r, include=FALSE}
+#length(sj_arimax$mean)
+```
+
+```{r, include=FALSE}
+#results form models
+#sj_arimax<-data.frame(city='sj',
+#                    year=sjtest$year,
+#                    week=sjtest$weekofyear,
+#                    total_cases=round(sj_arimax$mean))#
+#
+#iq_arimax<-data.frame(city='iq',
+#                    year=iqtest$year,
+#                    week=iqtest$weekofyear,
+#                    total_cases=round(iq_arimax$mean))#
+#
+#arimax<-union_all(sj_arimax, iq_arimax)
+```
+
+
+```{r}
+accuracy(sjarimax2)
+```
+
+```{r}
+accuracy(nntsj)
+```
+
+```{r}
+accuracy(nntiq)
+```
+
+
+```{r, include=FALSE}
+#results form models
+#sjpred1<-round(sjarima$mean)
+#sj_arima<-data.frame(city='sj',
+#                    year=sjtest$year,
+#                    week=sjtest$weekofyear,
+#                    total_cases=round(sjarima$mean))
+#iq_arima<-data.frame(city='iq',
+#                    year=iqtest$year,
+#                    week=iqtest$weekofyear,
+#                    total_cases=round(iqarima$mean))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
